@@ -1,4 +1,4 @@
-export type SettingItemMeta = {
+﻿export type SettingItemMeta = {
     id: string;
     name: string;
     description?: string;
@@ -210,6 +210,7 @@ export type NovelAiPreset = {
 
 export type NovelAiSettings = {
     apiKey: string;
+    baseUrl?: string;
     activePresetId: string;
     presets: NovelAiPreset[];
 };

@@ -1,4 +1,4 @@
-import type {
+﻿import type {
     PresetConfig,
     WorldBookConfig,
     WorldBookEntry,
@@ -693,6 +693,7 @@ export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
     extraPrompt: "",
     novelai: {
         apiKey: "",
+        baseUrl: undefined,
         activePresetId: DEFAULT_NOVELAI_PRESET.id,
         presets: [DEFAULT_NOVELAI_PRESET],
     },
@@ -755,6 +756,7 @@ function normalizeImageGenerationSettings(settings: Partial<ImageGenerationSetti
 
     const novelai: import("./settings-types").NovelAiSettings = {
         apiKey: typeof rawNai?.apiKey === "string" ? rawNai.apiKey : "",
+        baseUrl: typeof rawNai?.baseUrl === "string" ? rawNai.baseUrl.trim() || undefined : undefined,
         activePresetId,
         presets: naiPresets,
     };

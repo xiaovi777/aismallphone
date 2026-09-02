@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { AlertCircle, Camera, ChevronDown, Image, Info, Plus, RefreshCw, Sparkles, Trash2, Upload } from "lucide-react";
@@ -233,7 +233,7 @@ export function ImageGenerationSettings() {
         }
         setIsFetchingNaiModels(true);
         try {
-            const fetched = await fetchNovelAiModels(naiSettings.apiKey);
+            const fetched = await fetchNovelAiModels(naiSettings.apiKey, naiSettings.baseUrl);
             setNaiModels(fetched);
             setNaiTokenStatus({
                 success: true,
@@ -352,6 +352,16 @@ export function ImageGenerationSettings() {
                                 placeholder="pst-..."
                             />
                             <span className="menu-desc ml-1">可在 NovelAI 官网 Account 页面获取 Persistent API Token。</span>
+                        <div className="flex flex-col gap-1 mt-3">
+                            <label className="menu-desc ml-1">API 地址（兼容站）</label>
+                            <Input
+                                type="text"
+                                value={naiSettings.baseUrl || ""}
+                                onChange={(event) => updateNovelAi({ baseUrl: event.target.value })}
+                                placeholder="https://image.novelai.net"
+                            />
+                            <span className="menu-desc ml-1">默认官方接口。填第三方兼容站地址即可切换，留空走官方。</span>
+                        </div>
                             {naiTokenStatus && (
                                 <div role={naiTokenStatus.success ? "status" : "alert"} className="mt-2">
                                     <Alert variant={naiTokenStatus.success ? "success" : "danger"}>

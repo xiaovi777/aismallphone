@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { ProxyAgent, type Dispatcher } from "undici";
 import JSZip from "jszip";
 import {
@@ -26,6 +26,7 @@ type ImageGenerationRequest = {
   quality?: string;
   referenceImageDataUrl?: string;
   // NovelAI 专属参数
+  novelaiBaseUrl?: string;
   negativePrompt?: string;
   steps?: number;
   scale?: number;
@@ -208,7 +209,8 @@ async function runNovelAiGeneration(input: ImageGenerationRequest): Promise<{ st
 
     const { width, height } = getNovelAiResolution(input.size);
 
-    const url = "https://image.novelai.net/ai/generate-image";
+    const novelaiBase = input.novelaiBaseUrl?.trim().replace(/\/+$/, "") || "https://image.novelai.net";
+  const url = novelaiBase.endsWith("/ai/generate-image") ? novelaiBase : novelaiBase + "/ai/generate-image";
     const headers: Record<string, string> = {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
