@@ -211,11 +211,14 @@ async function runNovelAiGeneration(input: ImageGenerationRequest): Promise<{ st
 
     const novelaiBase = input.novelaiBaseUrl?.trim().replace(/\/+$/, "") || "https://image.novelai.net";
   const url = novelaiBase.endsWith("/ai/generate-image") ? novelaiBase : novelaiBase + "/ai/generate-image";
+    let originHost = "https://novelai.net";
+    try { originHost = new URL(novelaiBase).origin; } catch { /* fallback */ }
     const headers: Record<string, string> = {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      Origin: "https://novelai.net",
-      Referer: "https://novelai.net/",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      Origin: originHost,
+      Referer: originHost + "/",
     };
 
     const parameters: Record<string, unknown> = {
