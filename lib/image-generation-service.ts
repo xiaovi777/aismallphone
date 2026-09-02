@@ -757,7 +757,8 @@ export async function generateImageFromConfiguredApi(params: {
     if (description) positiveParts.push(description);
     const fullPrompt = positiveParts.join(", ");
 
-    const data = settings.requestMode === "direct"
+    const useDirect = settings.requestMode === "direct" || !!settings.novelai?.baseUrl?.trim();
+    const data = useDirect
       ? await generateNovelAiDirect({ apiKey: naiApiKey, baseUrl: settings.novelai?.baseUrl, preset: activePreset, prompt: fullPrompt, signal: params.signal })
       : await generateNovelAiViaServer({ apiKey: naiApiKey, baseUrl: settings.novelai?.baseUrl, preset: activePreset, prompt: fullPrompt, signal: params.signal });
 
@@ -791,7 +792,6 @@ export async function generateImageFromConfiguredApi(params: {
     : null;
   throwIfAborted(params.signal);
   const prompt = mergePrompt(description, settings.extraPrompt);
-
   const data = settings.requestMode === "direct"
     ? await generateImageDirect({ settings, prompt, referenceImageDataUrl, signal: params.signal })
     : await generateImageViaServerOrProxy({ settings, prompt, referenceImageDataUrl, signal: params.signal });
