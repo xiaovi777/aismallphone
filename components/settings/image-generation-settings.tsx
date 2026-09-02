@@ -131,6 +131,7 @@ export function ImageGenerationSettings() {
         const activePreset = presets.find(p => p.id === nai?.activePresetId) || presets[0];
         return {
             apiKey: nai?.apiKey || "",
+            baseUrl: nai?.baseUrl || "",
             activePresetId: activePreset.id,
             presets,
             activePreset,
@@ -142,6 +143,7 @@ export function ImageGenerationSettings() {
             ...settings,
             novelai: {
                 apiKey: naiSettings.apiKey,
+                baseUrl: naiSettings.baseUrl,
                 activePresetId: naiSettings.activePresetId,
                 presets: naiSettings.presets,
                 ...patch,
