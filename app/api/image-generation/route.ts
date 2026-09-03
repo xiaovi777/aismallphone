@@ -317,9 +317,13 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
       body = form;
     } else {
       headers["Content-Type"] = "application/json";
+      let isOpenAiOfficial = false;
+      try { isOpenAiOfficial = /(?:^|\.)openai\.com$/i.test(new URL(normalizeBaseUrl(baseUrl)).hostname); } catch { /* 非法地址交给后续校验报错 */ }
       body = JSON.stringify({
         model,
         prompt,
+        n: 1,
+        ...(!isOpenAiOfficial ? { response_format: "b64_json" } : {}),
         ...(input.size && input.size !== "auto" ? { size: input.size } : {}),
         ...(input.quality && input.quality !== "auto" ? { quality: input.quality } : {}),
       });

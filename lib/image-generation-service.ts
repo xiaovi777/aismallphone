@@ -348,9 +348,13 @@ async function generateImageDirect(params: {
     body = form;
   } else {
     headers["Content-Type"] = "application/json";
+    let isOpenAiOfficial = false;
+    try { isOpenAiOfficial = /(?:^|\.)openai\.com$/i.test(new URL(normalizeBaseUrl(settings.baseUrl)).hostname); } catch { /* 非法地址交给后续报错处理 */ }
     body = JSON.stringify({
       model: settings.model,
       prompt,
+      n: 1,
+      ...(!isOpenAiOfficial ? { response_format: "b64_json" } : {}),
       ...(settings.size && settings.size !== "auto" ? { size: settings.size } : {}),
       ...(settings.quality && settings.quality !== "auto" ? { quality: settings.quality } : {}),
     });
