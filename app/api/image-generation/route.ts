@@ -338,6 +338,31 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
       clearTimeout(timeout);
     }
 
+    // ninijoker 中转站的 PST 官方秘钥会被 /v1/images/generations 拒绝(401/403)，
+    // 这类秘钥的出图端点是 /v1/user/test-pst，自动重试一次。
+    if (!res.ok && !hasReference && (res.status === 401 || res.status === 403)) {
+      let isNiniJoker = false;
+      try { isNiniJoker = /ninijoker-api\.com$/i.test(new URL(normalizeBaseUrl(baseUrl)).hostname); } catch { /* 忽略 */ }
+      if (isNiniJoker) {
+        await res.text().catch(() => "");
+        const niniBase = normalizeBaseUrl(baseUrl);
+        const pstUrl = /\/v1$/i.test(niniBase) ? `${niniBase}/user/test-pst` : `${niniBase}/v1/user/test-pst`;
+        const pstBody = JSON.stringify({
+          prompt,
+          negative_prompt: "",
+          size: input.size && input.size !== "auto" ? input.size : "1024x1024",
+          steps: 28,
+          scale: 5,
+          sampler: "k_euler",
+        });
+        const pstTimeout = setTimeout(() => controller.abort(), 120_000);
+        try {
+          res = await externalFetch(pstUrl, { method: "POST", headers, body: pstBody, signal: controller.signal });
+        } catch { /* 重试网络失败时沿用原错误响应 */ }
+        finally { clearTimeout(pstTimeout); }
+      }
+    }
+
     const contentType = (res.headers.get("content-type") || "").toLowerCase();
     if (!res.ok) {
       const errText = await res.text().catch(() => "");

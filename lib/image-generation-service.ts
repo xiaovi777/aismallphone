@@ -320,6 +320,15 @@ export async function fetchImageGenerationModels(settings: Pick<ImageGenerationS
 // 留空 = 关闭,沿用 Netlify 心跳流式路由。自部署请配置自己的代理地址。
 export const IMAGE_GEN_PROXY_URL = (process.env.NEXT_PUBLIC_IMAGE_GEN_PROXY_URL || "").trim().replace(/\/+$/, "");
 
+function isNiniJokerBaseUrl(baseUrl: string): boolean {
+  try { return /ninijoker-api\.com$/i.test(new URL(normalizeBaseUrl(baseUrl)).hostname); } catch { return false; }
+}
+
+function niniJokerTestPstUrl(baseUrl: string): string {
+  const base = normalizeBaseUrl(baseUrl);
+  return /\/v1$/i.test(base) ? `${base}/user/test-pst` : `${base}/v1/user/test-pst`;
+}
+
 async function generateImageDirect(params: {
   settings: ImageGenerationSettings;
   prompt: string;
@@ -367,7 +376,27 @@ async function generateImageDirect(params: {
   if (signal) signal.addEventListener("abort", onOuterAbort, { once: true });
   const totalTimer = setTimeout(() => controller.abort(), 360_000);
   try {
-    return await parseImageGenerationResponse(await fetch(url, { method: "POST", headers, body, signal: controller.signal }), signal);
+    const res = await fetch(url, { method: "POST", headers, body, signal: controller.signal });
+    // ninijoker 中转站的 PST 官方秘钥会被 /v1/images/generations 拒绝(401/403)，
+    // 这类秘钥的出图端点是 /v1/user/test-pst，这里自动重试一次。
+    if (!res.ok && (res.status === 401 || res.status === 403) && isNiniJokerBaseUrl(settings.baseUrl)) {
+      await res.body?.cancel().catch(() => {});
+      const pstRes = await fetch(niniJokerTestPstUrl(settings.baseUrl), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          prompt,
+          negative_prompt: "",
+          size: settings.size && settings.size !== "auto" ? settings.size : "1024x1024",
+          steps: 28,
+          scale: 5,
+          sampler: "k_euler",
+        }),
+        signal: controller.signal,
+      });
+      return await parseImageGenerationResponse(pstRes, signal);
+    }
+    return await parseImageGenerationResponse(res, signal);
   } catch (error) {
     if (controller.signal.aborted && !signal?.aborted) {
       throw new Error(proxyBaseUrl ? "生图代理超时（360 秒未返回）" : "生图请求超时（360 秒未返回）");
