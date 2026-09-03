@@ -539,18 +539,12 @@ async function generateNovelAiDirect(params: {
       sampler: normalizeNovelAiSampler(preset.sampler),
       steps: normalizeNovelAiSteps(preset.steps),
       n_samples: 1,
-      ucPreset: 0,
-      qualityToggle: preset.qualityToggle !== false,
+      seed: Math.floor(Math.random() * 999999999),
+      negative_prompt: preset.negativePrompt || "",
       sm: preset.smea === true,
       sm_dyn: preset.smeaDyn === true,
-      dynamic_thresholding: false,
-      controlnet_strength: 1,
-      legacy: false,
-      add_original_image: false,
-      uncond_scale: 1,
-      cfg_rescale: 0,
-      noise_schedule: normalizeNovelAiNoiseSchedule(preset.noiseSchedule),
-      negative_prompt: preset.negativePrompt || "",
+      qualityToggle: preset.qualityToggle !== false,
+      ucPreset: 0,
     },
   });
 
@@ -568,6 +562,15 @@ async function generateNovelAiDirect(params: {
 
     const arrayBuf = await res.arrayBuffer();
     const uint8 = new Uint8Array(arrayBuf);
+    const contentTypeHeader = (res.headers.get("content-type") || "").toLowerCase();
+    if (contentTypeHeader.includes("json")) {
+      const jsonText = new TextDecoder().decode(uint8);
+      const json = JSON.parse(jsonText);
+      const img = Array.isArray(json.image) ? json.image[0] : (json.image || json.output?.[0]);
+      if (!img || typeof img !== "string") throw new Error("NovelAI 返回的 JSON 中未找到图片数据");
+      return { b64: img.includes(",") ? img.split(",")[1] : img, mimeType: "image/png" };
+    }
+
     const isZip = (uint8[0] === 0x50 && uint8[1] === 0x4b && uint8[2] === 0x03 && uint8[3] === 0x04)
       || (res.headers.get("content-type") || "").toLowerCase().includes("zip");
 
