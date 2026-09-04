@@ -6,8 +6,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ChevronLeft, Copy, History, MoreHorizontal, Pencil, Plus, RotateCcw, Send, Sun, WandSparkles, X } from "lucide-react";
-import { continueMix, editMixTurn, generateMixReply, canReplayMixFrom, MIX_REPAIR_EVENT, MIX_STORE_SNAPSHOT_TURNS, mixTurnRawText, recordMixPanelStore, refreshMixOpening, regenerateMixTail, rerollMixReply, runMixEditSync, runMixSessionEnd, truncateMixAfterTurn, type MixRepairEventDetail } from "@/lib/mixology/engine";
-import { getMixMaterial, getMixSession, isMixBuiltinId, listMixPickables, MIX_CABINET_UPDATED_EVENT, resolveMixRecipeMaterials, saveMixMaterial, saveMixSession } from "@/lib/mixology/storage";
+import { continueMix, editMixTurn, generateMixReply, canReplayMixFrom, MIX_STORE_SNAPSHOT_TURNS, mixTurnRawText, recordMixPanelStore, refreshMixOpening, regenerateMixTail, rerollMixReply, runMixEditSync, runMixSessionEnd, truncateMixAfterTurn } from "@/lib/mixology/engine";
+import { findMixConnector, getMixMaterial, getMixSession, isMixBuiltinId, listMixPickables, MIX_CABINET_UPDATED_EVENT, resolveMixRecipeMaterials, saveMixMaterial, saveMixSession } from "@/lib/mixology/storage";
 import { applyMixMacros, MIX_DEFAULT_USER_NAME } from "@/lib/mixology/assembler";
 import { buildMixConditionContext, pickActiveMixMaterials } from "@/lib/mixology/state";
 import { scopeMixCss } from "@/lib/mixology/css-scope";
@@ -17,7 +17,13 @@ import { MixProseView } from "./prose-view";
 import { MixRichText } from "./rich-text";
 import { KindGlyph, MixConfirm } from "./mixology-shared";
 import { MixTicketFrame } from "./ticket-frame";
-import { MixMechanismInline, MixMechanismPanel } from "./mechanism-panel";
+import { audioToBlob, MixMechanismInline, MixMechanismPanel, sendMixDialogue } from "./mechanism-panel";
+import { MixTrustedSlot } from "./trusted-slot";
+import { disposeMixTrusted, disposeMixTrustedForMaterial, ensureMixTrusted, sendMixTrustedDialogue, type MixTrustedHost } from "@/lib/mixology/trusted-runtime";
+import { normalizeMixConnectorParams, runMixConnector, takeMixConnectorQuota } from "@/lib/mixology/connectors";
+import { playMixAudio, primeMixAudio, stopMixAudio } from "@/lib/mixology/audio-player";
+
+import type { MixProseDialogue } from "./prose-view";
 import { MixSlotEditor } from "./slot-editor";
 import { MixMaterialEditor } from "./mixology-editor";
 import { disposeMixSandboxesForMaterial } from "@/lib/mixology/mechanism-runtime";
@@ -34,7 +40,7 @@ type GameProps = {
 /** 一轮里要渲染的一块（状态栏/小剧场）：皮 + 这一轮的原文 */
 type TurnFrame = { key: string; html: string; raw: string };
 
-function AssistantTurn({ turn, ticketFrames, encoreFrames, filterRules, state }: { turn: MixTurn; ticketFrames: TurnFrame[]; encoreFrames: TurnFrame[]; filterRules?: MixFilterRule[]; state?: MixState }) {
+function AssistantTurn({ turn, ticketFrames, encoreFrames, filterRules, state, dialogue }: { turn: MixTurn; ticketFrames: TurnFrame[]; encoreFrames: TurnFrame[]; filterRules?: MixFilterRule[]; state?: MixState; dialogue?: MixProseDialogue }) {
     // 展示顺序：状态栏在正文前、小剧场在正文后（与模型的输出顺序一致，无需重排）；
     // 一轮多块时依次上下排开，各块各自的皮各渲染各的
     // 滤网「仅显示」模式在这里生效：存储不动，渲染前替换，历史消息也即时生效
@@ -46,7 +52,7 @@ function AssistantTurn({ turn, ticketFrames, encoreFrames, filterRules, state }:
                     <MixTicketFrame html={frame.html} raw={frame.raw} state={state} />
                 </div>
             ))}
-            {shownText ? <MixProseView text={shownText} /> : null}
+            {shownText ? <MixProseView text={shownText} dialogue={dialogue} /> : null}
             {encoreFrames.map((frame) => (
                 <div className="mix-encore-turn" key={frame.key}>
                     <MixTicketFrame html={frame.html} raw={frame.raw} state={state} />
@@ -183,22 +189,6 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         window.addEventListener(MIX_CABINET_UPDATED_EVENT, bump);
         return () => window.removeEventListener(MIX_CABINET_UPDATED_EVENT, bump);
     }, []);
-    /**
-     * 状态栏补写提示：补写是流式结束后追加的一次模型往返，屏幕上没有任何
-     * 东西在动——引擎广播事件，这里挂一个半透明小 toast 告诉用户在补什么。
-     */
-    const [repairNote, setRepairNote] = useState<string | null>(null);
-    useEffect(() => {
-        const onRepair = (event: Event) => {
-            const detail = (event as CustomEvent<MixRepairEventDetail>).detail;
-            if (!detail || detail.sessionId !== sessionId) return;
-            setRepairNote(detail.done ? null : detail.name ?? "");
-        };
-        window.addEventListener(MIX_REPAIR_EVENT, onRepair);
-        return () => window.removeEventListener(MIX_REPAIR_EVENT, onRepair);
-    }, [sessionId]);
-    // 兜底：这轮怎么收场的都别让 toast 挂着（引擎侧异常路径已在 finally 里收过一道）
-    useEffect(() => { if (!busy) setRepairNote(null); }, [busy]);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const abortRef = useRef<AbortController | null>(null);
     const wheelRef = useRef<HTMLDivElement | null>(null);
@@ -279,12 +269,19 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
      * 真糊满屏幕还有「一键收起」的逃生口。
      * 摆放取材料自己写的那份；玩家在这一局里拖动过的，以拖过的为准。
      */
-    const panels = useMemo(() => {
-        if (!session) return [] as { material: MixMechanismMaterial; layout: MixPanelLayout }[];
+    /** 这一局生效的全部机括（沙盒的与信任模式的都在） */
+    const activeMechanisms = useMemo(() => {
+        if (!session) return [] as MixMechanismMaterial[];
         const { entries } = resolveMixRecipeMaterials(session.recipe);
         const active = pickActiveMixMaterials(entries, buildMixConditionContext(session));
-        return (active.mechanism ?? [])
-            .filter((m): m is MixMechanismMaterial => m.kind === "mechanism" && Boolean(m.panelHtml?.trim()))
+        return (active.mechanism ?? []).filter((m): m is MixMechanismMaterial => m.kind === "mechanism");
+    }, [session, cabinetTick]); // eslint-disable-line react-hooks/exhaustive-deps
+    /** 信任模式的机括：代码直接在页面里跑，坑位由 MixTrustedSlot 挂 */
+    const trustedMechanisms = useMemo(() => activeMechanisms.filter((m) => m.trusted && m.script?.trim()), [activeMechanisms]);
+    const panels = useMemo(() => {
+        if (!session) return [] as { material: MixMechanismMaterial; layout: MixPanelLayout }[];
+        return activeMechanisms
+            .filter((m) => !m.trusted && Boolean(m.panelHtml?.trim()))
             .map((material) => {
                 const base = mixPanelLayoutOf(material);
                 if (!base) return null;
@@ -292,7 +289,21 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                 return { material, layout: moved ? { ...base, ...moved } : base };
             })
             .filter((item): item is { material: MixMechanismMaterial; layout: MixPanelLayout } => item !== null);
-    }, [session, cabinetTick]);
+    }, [session, activeMechanisms]);
+
+    // 机括声明了连接器而本机没配：进局时提醒一次（同一局只提一次），
+    // 免得玩家点了半天按钮才在沙盒里看到一条报错
+    const missingWarnedRef = useRef("");
+    useEffect(() => {
+        const missing = activeMechanisms.flatMap((material) =>
+            (material.connectors ?? []).filter((name) => !findMixConnector(name)).map((name) => ({ material: material.name, name })));
+        if (!missing.length) return;
+        const key = missing.map((m) => `${m.material}:${m.name}`).join("|");
+        if (missingWarnedRef.current === key) return;
+        missingWarnedRef.current = key;
+        const first = missing[0];
+        onToast(`机括「${first.material}」需要连接器「${first.name}」，到酒柜的「连接器」里创建一个再来。`);
+    }, [activeMechanisms, onToast]);
 
     /**
      * 按挂点分组：float 走悬浮层（老形态），header/inputbar-* 由宿主画按钮开合，
@@ -306,6 +317,7 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
             "inputbar-right": [] as typeof panels,
             "flow-top": [] as typeof panels,
             "flow-bottom": [] as typeof panels,
+            hidden: [] as typeof panels,
         };
         for (const item of panels) groups[mixPanelSlotOf(item.layout)].push(item);
         return groups;
@@ -336,6 +348,53 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         saveMixSession({ ...current, panelOpen: next });
         setSession(getMixSession(sessionId));
     }, [sessionId]);
+
+    /**
+     * 对白按钮：声明了 dialogueButton 的机括，宿主替它在每句「对白」后画一颗图标。
+     * 点击把这句话递进它的界面（sendMixDialogue），界面用 mix.mark 回报状态改图标。
+     * 按钮位（header/inputbar-*）的面板关着时收不到，先替玩家打开再递。
+     */
+    const dialogueActions = useMemo(
+        () => activeMechanisms
+            .filter((material) => material.dialogueButton?.icon && (material.trusted ? material.script?.trim() : material.panelHtml?.trim()))
+            .map((material) => ({ key: material.id, icon: material.dialogueButton!.icon, title: material.dialogueButton!.title || material.name })),
+        [activeMechanisms],
+    );
+    const [dialogueStates, setDialogueStates] = useState<Record<string, string>>({});
+    const handlePanelMark = useCallback((materialId: string, id: string, state: string) => {
+        setDialogueStates((prev) => {
+            const key = `${materialId}|${id}`;
+            if ((prev[key] || "") === state) return prev;
+            const next = { ...prev };
+            if (state) next[key] = state;
+            else delete next[key];
+            return next;
+        });
+    }, []);
+    const handleDialogueTap = useCallback((materialId: string, segmentId: string, text: string, turnId: string) => {
+        // 这次点击是宿主拿到的唯一手势：趁现在把播放元素解锁，机括稍后 mix.play 才放得出声（iOS）
+        primeMixAudio();
+        if (trustedMechanisms.some((m) => m.id === materialId)) {
+            sendMixTrustedDialogue(sessionId, materialId, { id: segmentId, text, turnId });
+            return;
+        }
+        const item = panels.find(({ material }) => material.id === materialId);
+        if (!item) return;
+        const slot = mixPanelSlotOf(item.layout);
+        if ((slot === "header" || slot === "inputbar-left" || slot === "inputbar-right") && !(getMixSession(sessionId)?.panelOpen?.[materialId])) {
+            toggleDock(materialId);
+        }
+        sendMixDialogue(materialId, { id: segmentId, text, turnId });
+    }, [panels, trustedMechanisms, sessionId, toggleDock]);
+    const dialogueFor = useCallback((turnId: string): MixProseDialogue | undefined => {
+        if (!dialogueActions.length) return undefined;
+        return {
+            actions: dialogueActions,
+            states: dialogueStates,
+            idPrefix: `${turnId}:`,
+            onTap: (key, segmentId, text) => handleDialogueTap(key, segmentId, text, turnId),
+        };
+    }, [dialogueActions, dialogueStates, handleDialogueTap]);
 
     /**
      * 机括界面的逃生口。摆放完全交给创作者之后，理论上存在"一块面板糊满整个屏幕、
@@ -520,6 +579,58 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
      */
     const sayRef = useRef<(text: string) => void>(() => {});
     const handlePanelSay = useCallback((text: string) => { sayRef.current(text); }, []);
+
+    /**
+     * 信任模式机括的宿主能力：与沙盒面板同一套语义（存储、记住的值、发言、连接器、播放、
+     * 对白按钮状态、提示），只是直接以函数递给页面里跑的代码。
+     */
+    const trustedHost = useMemo<MixTrustedHost>(() => ({
+        getState: () => getMixSession(sessionId)?.state ?? {},
+        getStore: (materialId) => getMixSession(sessionId)?.mechanismStore?.[materialId] ?? {},
+        setStore: (materialId, store) => handlePanelStore(materialId, store),
+        setState: (patch) => handlePanelState(patch),
+        say: (text) => { const t = text.trim().slice(0, 2000); if (t) handlePanelSay(t); },
+        toast: (text) => { const t = text.trim().slice(0, 120); if (t) onToast(t); },
+        mark: (materialId, id, state) => handlePanelMark(materialId, id, state),
+        call: async (materialId, name, params) => {
+            const material = getMixMaterial(materialId);
+            const declared = material?.kind === "mechanism" ? material.connectors ?? [] : [];
+            const key = name.trim().toLowerCase();
+            if (!declared.includes(key)) throw new Error(`这件机括没有声明连接器「${key}」。`);
+            const connector = findMixConnector(key);
+            if (!connector) { const err = new Error(`本机还没有叫「${key}」的连接器，到酒柜的「连接器」里创建一个。`); (err as Error & { missing?: boolean }).missing = true; throw err; }
+            const normalized = normalizeMixConnectorParams(params);
+            if ("err" in normalized) throw new Error(normalized.err);
+            if (!takeMixConnectorQuota(materialId)) throw new Error("调用太频繁：每件机括每分钟最多 30 次。");
+            const result = await runMixConnector(connector, normalized.params);
+            if (!result.ok) throw new Error(result.error);
+            return { status: result.status, data: result.data };
+        },
+        play: (materialId, id, audio, type) => {
+            const blob = audioToBlob(audio, type);
+            if (!blob) { onToast("机括递上来的音频格式不对（要 data: URL、ArrayBuffer 或 Blob，24MB 以内）。"); return; }
+            playMixAudio(blob, {
+                onStart: () => { if (id) handlePanelMark(materialId, id, "playing"); },
+                onEnd: () => { if (id) handlePanelMark(materialId, id, ""); },
+                onError: (message) => { if (id) handlePanelMark(materialId, id, ""); onToast(message); },
+            });
+        },
+        stop: () => stopMixAudio(),
+        charName: () => getMixSession(sessionId)?.charName ?? "",
+        userName: () => getMixSession(sessionId)?.userName || MIX_DEFAULT_USER_NAME,
+    }), [sessionId, handlePanelStore, handlePanelState, handlePanelSay, handlePanelMark, onToast]);
+
+    // 进对局建实例（材料改过会重建），离开时收掉
+    useEffect(() => {
+        for (const material of trustedMechanisms) ensureMixTrusted(sessionId, material, trustedHost);
+    }, [sessionId, trustedMechanisms, trustedHost]);
+    useEffect(() => () => disposeMixTrusted(sessionId), [sessionId]);
+
+    /** 给坑位组件的公共参数 */
+    const trustedBase = session
+        ? { state: session.state ?? {}, charName: session.charName, userName: session.userName || MIX_DEFAULT_USER_NAME }
+        : null;
+
 
     if (!session) {
         return (
@@ -920,6 +1031,9 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             onStore={handlePanelStore}
                             onState={handlePanelState}
                             onSay={handlePanelSay}
+                            connectors={material.connectors}
+                            onMark={handlePanelMark}
+                            onToast={onToast}
                         />
                     ))}
                 </div>
@@ -951,6 +1065,9 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             onStore={handlePanelStore}
                             onState={handlePanelState}
                             onSay={handlePanelSay}
+                            connectors={material.connectors}
+                            onMark={handlePanelMark}
+                            onToast={onToast}
                         />
                     </div>
                 ))}
@@ -973,8 +1090,20 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             {actions}
                         </div>
                     ) : (
-                        <div className="mix-assistant-turn" key={turn.id}>
-                            <AssistantTurn turn={turn} ticketFrames={turnTicketFrames(turn)} encoreFrames={turnEncoreFrames(turn)} filterRules={assets.filterRules} state={turn.state} />
+                        <div className="mix-assistant-turn" key={turn.id} data-turn={turn.id}>
+                            <AssistantTurn turn={turn} ticketFrames={turnTicketFrames(turn)} encoreFrames={turnEncoreFrames(turn)} filterRules={assets.filterRules} state={turn.state} dialogue={dialogueFor(turn.id)} />
+                            {/* 信任模式机括的坑位：prose 拿这一轮的正文容器本身，turn 在正文下方给一块 */}
+                            {trustedBase ? trustedMechanisms.map((material) => {
+                                const shownText = applyMixFilterRules(turn.text, assets.filterRules, "display");
+                                const store = session.mechanismStore?.[material.id] ?? {};
+                                return (
+                                    <div key={material.id} className="mix-trusted-turn">
+                                        <MixTrustedSlot sessionId={sessionId} materialId={material.id} slot="prose" turnId={turn.id} text={shownText} index={idx} store={store} {...trustedBase}
+                                            target={() => document.querySelector<HTMLElement>(`.mix-game [data-turn="${turn.id}"] .mix-prose`)} />
+                                        <MixTrustedSlot sessionId={sessionId} materialId={material.id} slot="turn" turnId={turn.id} text={shownText} index={idx} store={store} {...trustedBase} />
+                                    </div>
+                                );
+                            }) : null}
                             {actions}
                         </div>
                     );
@@ -984,7 +1113,7 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                     const shown = applyMixFilterRules(mixStreamText(live), assets.filterRules, "display");
                     return shown ? (
                         <div className="mix-live-turn">
-                            <MixProseView text={shown} />
+                            <MixProseView text={shown} streaming />
                         </div>
                     ) : (
                         <div className="mix-game-thinking" aria-label="生成中">
@@ -992,6 +1121,9 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         </div>
                     );
                 })() : null}
+                {trustedBase ? trustedMechanisms.map((material) => (
+                    <MixTrustedSlot key={`b-${material.id}`} sessionId={sessionId} materialId={material.id} slot="bottom" store={session.mechanismStore?.[material.id] ?? {}} {...trustedBase} className="mix-trusted-slot mix-flow-panel" />
+                )) : null}
                 {slotGroups["flow-bottom"].map(({ material, layout }) => (
                     <div className="mix-flow-panel" data-at="bottom" key={material.id}>
                         <MixMechanismInline
@@ -1004,6 +1136,9 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             onStore={handlePanelStore}
                             onState={handlePanelState}
                             onSay={handlePanelSay}
+                            connectors={material.connectors}
+                            onMark={handlePanelMark}
+                            onToast={onToast}
                         />
                     </div>
                 ))}
@@ -1013,6 +1148,34 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                     </div>
                 ))}
             </div>
+            {/* 无界面的机括：沙盒照常挂着、照常收对白事件，只是什么都不画 */}
+            {slotGroups.hidden.length ? (
+                <div hidden aria-hidden="true">
+                    {slotGroups.hidden.map(({ material }) => (
+                        <MixMechanismInline
+                            key={material.id}
+                            materialId={material.id}
+                            name={material.name}
+                            html={material.panelHtml ?? ""}
+                            state={session.state ?? {}}
+                            store={session.mechanismStore?.[material.id] ?? {}}
+                            onStore={handlePanelStore}
+                            onState={handlePanelState}
+                            onSay={handlePanelSay}
+                            connectors={material.connectors}
+                            onMark={handlePanelMark}
+                            onToast={onToast}
+                        />
+                    ))}
+                </div>
+            ) : null}
+            {trustedBase && trustedMechanisms.length && !panelsHidden ? (
+                <div className="mix-panel-layer" data-trusted="true">
+                    {trustedMechanisms.map((material) => (
+                        <MixTrustedSlot key={`f-${material.id}`} sessionId={sessionId} materialId={material.id} slot="float" store={session.mechanismStore?.[material.id] ?? {}} {...trustedBase} className="mix-trusted-float" />
+                    ))}
+                </div>
+            ) : null}
             {slotGroups.float.length && !panelsHidden ? (
                 <div className="mix-panel-layer">
                     {slotGroups.float.map(({ material, layout }) => (
@@ -1027,6 +1190,9 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             onStore={handlePanelStore}
                             onState={handlePanelState}
                             onSay={handlePanelSay}
+                            connectors={material.connectors}
+                            onMark={handlePanelMark}
+                            onToast={onToast}
                             onBox={handlePanelBox}
                         />
                     ))}
@@ -1046,14 +1212,11 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             onStore={handlePanelStore}
                             onState={handlePanelState}
                             onSay={handlePanelSay}
+                            connectors={material.connectors}
+                            onMark={handlePanelMark}
+                            onToast={onToast}
                         />
                     ))}
-                </div>
-            ) : null}
-            {repairNote !== null ? (
-                <div className="mix-repair-toast" role="status">
-                    <span className="mix-repair-dots" aria-hidden="true"><i /><i /><i /></span>
-                    {repairNote ? `「${repairNote}」状态栏补写中` : "状态栏补写中"}
                 </div>
             ) : null}
             <div className="mix-game-inputbar">
@@ -1325,7 +1488,7 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                                         ? { ...material, publishedId: matEditor.initial.publishedId, publishedAt: matEditor.initial.publishedAt }
                                         : material);
                                     // 机括改完，正在跑的沙盒里还是老代码——收掉，下次调用重建
-                                    if (material.kind === "mechanism") disposeMixSandboxesForMaterial(material.id);
+                                    if (material.kind === "mechanism") { disposeMixSandboxesForMaterial(material.id); disposeMixTrustedForMaterial(material.id); }
                                     if (matEditor.slot && !matEditor.initial) {
                                         // 从「+」现场新建的就是为这一格建的：保存即入格，排在已有的后面
                                         writeSlot(matEditor.slot, [...mixSlotEntries(session.recipe.slots, matEditor.slot), { materialId: material.id }]);
