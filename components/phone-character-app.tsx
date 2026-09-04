@@ -54,6 +54,16 @@ import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { kvGet, kvSet } from "@/lib/kv-db";
 import { normalizeTimeZone } from "@/lib/character-time";
 import { removeCharacterChatReferences } from "@/lib/character-chat-cleanup";
+import { parseTavernCardFile, tavernParseErrorMessage, type TavernCardParseResult } from "@/lib/tavern-card-import";
+import { TavernCardImportDialog, type TavernImportConfirmPayload } from "@/components/tavern-card-import-dialog";
+import {
+  loadWorldBooks,
+  saveWorldBooks,
+  loadBindingConfig,
+  saveBindingConfig,
+  getCharacterBinding,
+  setCharacterBinding,
+} from "@/lib/settings-storage";
 
 type ViewType = "list" | "detail";
 
@@ -470,6 +480,8 @@ function CharListView({
   onNotice: (text: string) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const tavernFileRef = useRef<HTMLInputElement>(null);
+  const [tavernImport, setTavernImport] = useState<TavernCardParseResult | null>(null);
   const [showNpcGen, setShowNpcGen] = useState(false);
   const [activeMoveChar, setActiveMoveChar] = useState<Character | null>(null);
 
@@ -689,7 +701,7 @@ function CharListView({
   panRef.current = pan;
   const [showStylePicker, setShowStylePicker] = useState(false);
   const pendingStyleRef = useRef<number>(0);
-  const pendingActionRef = useRef<'import' | 'create'>('import');
+  const pendingActionRef = useRef<'import' | 'create' | 'tavern'>('import');
   const [pendingBgType, setPendingBgType] = useState<CanvasBgItem['type'] | null>(null);
   const [ghostPos, setGhostPos] = useState<{ x: number; y: number }>({ x: -9999, y: -9999 });
   const [importError, setImportError] = useState<string | null>(null);
@@ -891,19 +903,44 @@ function CharListView({
 
   async function handleImportFile(file: File) {
     const styleIdx = pendingStyleRef.current;
+    const tryTavernFallback = async (): Promise<boolean> => {
+      try {
+        const parsed = await parseTavernCardFile(file);
+        setTavernImport(parsed);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     try {
       if (file.type === "application/json" || file.name.endsWith(".json")) {
         const text = await file.text();
-        const data = parseCharacterFromJson(text);
-        if (!data) return onNotice("解析失败，请检查文件格式");
-        const c = createCharacter(data);
-        c.polaroidStyle = styleIdx;
-        onStartCharPlacement(c);
-        onNotice("点击画布放置角色");
+        let data: CharacterImportData | null = null;
+        let blocked = false;
+        try {
+          data = parseCharacterFromJson(text);
+        } catch (e) {
+          if (e instanceof Error && e.message === CHAR_BLOCKED_FIELDS) blocked = true;
+          else throw e;
+        }
+        if (data && (data.name.trim() || data.persona.trim())) {
+          const c = createCharacter(data);
+          c.polaroidStyle = styleIdx;
+          onStartCharPlacement(c);
+          onNotice("点击画布放置角色");
+          return;
+        }
+        // 非本应用的卡格式：尝试按酒馆卡（SillyTavern）解析
+        if (await tryTavernFallback()) return;
+        if (blocked) setImportError("不支持包含开场白、场景或示例对话的角色卡");
+        else onNotice("解析失败，请检查文件格式");
       } else if (file.type === "image/png" || file.name.endsWith(".png")) {
         const buffer = await file.arrayBuffer();
         const data = parseCharacterFromPng(buffer);
-        if (!data) return onNotice("未在 PNG 中找到角色数据");
+        if (!data) {
+          if (await tryTavernFallback()) return;
+          return onNotice("未在 PNG 中找到角色数据");
+        }
         let avatar = "";
         try {
           avatar = await fileToDataUrl(file);
@@ -929,6 +966,41 @@ function CharListView({
     }
   }
 
+  async function handleTavernImportFile(file: File) {
+    try {
+      const parsed = await parseTavernCardFile(file);
+      setTavernImport(parsed);
+    } catch (e) {
+      onNotice(tavernParseErrorMessage(e instanceof Error ? e.message : ""));
+    }
+  }
+
+  function confirmTavernImport(payload: TavernImportConfirmPayload) {
+    const styleIdx = pendingStyleRef.current;
+    const c = createCharacter({
+      name: payload.name,
+      persona: payload.persona,
+      avatar: payload.avatar || null,
+      tags: payload.tags,
+    });
+    c.polaroidStyle = styleIdx;
+    let wbNotice = "";
+    if (payload.worldbook) {
+      const books = loadWorldBooks();
+      books.push(payload.worldbook);
+      saveWorldBooks(books);
+      const config = loadBindingConfig();
+      const binding = getCharacterBinding(config, c.id);
+      const ids = binding.defaults.worldBookIds ? [...binding.defaults.worldBookIds] : [];
+      if (!ids.includes(payload.worldbook.id)) ids.push(payload.worldbook.id);
+      const nextBinding = { ...binding, defaults: { ...binding.defaults, worldBookIds: ids } };
+      saveBindingConfig(setCharacterBinding(config, nextBinding));
+      wbNotice = `，世界书「${payload.worldbook.name}」（${payload.worldbook.entries.length} 条）已绑定`;
+    }
+    setTavernImport(null);
+    onStartCharPlacement(c);
+    onNotice(`点击画布放置角色${wbNotice}`);
+  }
   function renderBgContent(item: CanvasBgItem) {
     const hash = item.id.charCodeAt(3) + item.id.charCodeAt(item.id.length - 1) * 17;
     const isBurnt = hash % 15 === 0;
@@ -1070,6 +1142,10 @@ function CharListView({
                 <IconImport />
                 <span>IMPORT</span>
               </button>
+              <button className="wt-bottom-pill-btn" onClick={() => { pendingActionRef.current = 'tavern'; setShowStylePicker(true); }}>
+                <IconImport />
+                <span>TAVERN</span>
+              </button>
               <button className="wt-bottom-pill-btn" onClick={() => { pendingActionRef.current = 'create'; setShowStylePicker(true); }}>
                 <IconPlus />
                 <span>CREATE</span>
@@ -1091,6 +1167,21 @@ function CharListView({
                   e.target.value = "";
                 }}
               />
+              <input
+                ref={tavernFileRef} type="file" accept=".json,.png,image/png,application/json" className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (file) await handleTavernImportFile(file);
+                  e.target.value = "";
+                }}
+              />
+              {tavernImport && (
+                <TavernCardImportDialog
+                  data={tavernImport}
+                  onConfirm={confirmTavernImport}
+                  onClose={() => setTavernImport(null)}
+                />
+              )}
             </div>
           </div>
         }
@@ -1488,6 +1579,8 @@ function CharListView({
                       setShowStylePicker(false);
                       if (pendingActionRef.current === 'import') {
                         fileRef.current?.click();
+                      } else if (pendingActionRef.current === 'tavern') {
+                        tavernFileRef.current?.click();
                       } else {
                         onCreate(idx);
                       }
