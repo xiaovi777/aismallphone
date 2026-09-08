@@ -31,3 +31,4 @@ tools/weixin-local-assistant/config.txt
 
 # local patch/test artifacts
 .patch-tavern/
+.patch-shell/
