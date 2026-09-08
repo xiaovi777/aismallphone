@@ -8,15 +8,16 @@
 // 这里只放两件事：递进去的数据包长什么样、还回来的东西怎么验。
 // 都是纯函数，可以脱离浏览器单测——这段错了不会报错，只会让机括默默改坏别人的对局。
 
-import type { MixState, MixStateValue } from "./types";
+import type { MixSectionTitleKey, MixState, MixStateValue } from "./types";
 
 /** 钩子点：流水线上开的四个口子（第五个「上桌时」属于常驻界面，不走这条通道） */
-export type MixHook = "sessionStart" | "beforeSend" | "afterReply" | "sessionEnd";
+export type MixHook = "sessionStart" | "beforeSend" | "rawReply" | "afterReply" | "sessionEnd";
 
-/** 界面上就写这四个词，不玩调酒行话——创作者要一眼知道钩子在什么时候被叫起来 */
+/** 界面上就写这几个词，不玩调酒行话——创作者要一眼知道钩子在什么时候被叫起来 */
 export const MIX_HOOK_LABELS: Record<MixHook, string> = {
     sessionStart: "开局时",
     beforeSend: "发送前",
+    rawReply: "回复后·剥块前",
     afterReply: "回复后",
     sessionEnd: "退出时",
 };
@@ -38,6 +39,18 @@ export type MixHookPayload = {
     userName: string;
     /** 落杯前：玩家这一句；出杯后：模型这一段正文 */
     text?: string;
+    /**
+     * rawReply 专用：模型输出的原文一个字不少（状态栏/小剧场块还没剥）。
+     * 返回同名字段，宿主就拿返回的这份去剥块、存库、画卡——机括伪装成状态栏要模型写的块
+     * （[状态栏:拍立得] 这类）在这里剪走，宿主就不会把它当状态栏画出来。
+     */
+    raw?: string;
+    /**
+     * 落杯前专用：最近一条 assistant 消息将要发给模型的完整文本（状态栏块 + 正文 + 小剧场块拼好的那份）。
+     * 钩子返回同名字段就整条换掉——只改这次请求，不落库，界面与存档不动。
+     * 多件机括按顺序接力，后一件看到的是前一件改过的版本。
+     */
+    lastReply?: string;
     /** 出杯后：这一轮的状态栏与小剧场原文（多块并行时为第一块，全量见 ticketRaws/encoreRaws） */
     ticketRaw?: string;
     encoreRaw?: string;
@@ -53,16 +66,39 @@ export type MixHookPayload = {
 };
 
 /** 沙盒还回来的东西 */
+/**
+ * 挂进系统提示词的一段：at 指定挂在哪个分段之后，text 原样接上（标题自带，
+ * 写 # 就是独立一段，写 ## 就读作那一段的小节）。只在这一轮的提示词里存在，不落库。
+ */
+export type MixHookSection = {
+    at: MixSectionTitleKey;
+    text: string;
+};
+
 export type MixHookResult = {
     /** 改写 text（落杯前改玩家这句，出杯后改模型正文） */
     text?: string;
-    /** 追加一段只在这一轮生效的临时提示 */
+    /** 改写模型原文（rawReply 钩子有效）：宿主拿返回的这份去剥块、存库 */
+    raw?: string;
+    /** 追加一段只在这一轮生效的临时提示（挂在最末尾那条 user 消息） */
     note?: string;
+    /** 挂进系统提示词指定分段之后的内容（落杯前钩子有效） */
+    sections?: MixHookSection[];
+    /**
+     * 改写最近一条 assistant 消息（落杯前钩子有效）：发给模型的那一条整条换成这段。
+     * 典型用法：把出杯后摘走的机括标记行/块放回它当初的位置，模型每轮都能看到自己上一轮写过它。
+     */
+    lastReply?: string;
     /** 要写进对局的记住值 */
     state?: MixState;
     /** 覆盖这件机括自己的存储 */
     store?: MixMechanismStore;
 };
+
+/** 可挂的分段键：与序言自定义标题的那一套一致 */
+export const MIX_HOOK_SECTION_KEYS: readonly MixSectionTitleKey[] = [
+    "base", "character", "persona", "world", "flavor", "glass", "ticket", "encore", "examples", "checklist",
+];
 
 // text / note / store 不设长度上限，也绝不静默裁剪——被截在半句话上的记忆、
 // 悄悄丢掉的存储键，出了问题根本查不到原因，比撑大上下文更伤人。
@@ -109,6 +145,7 @@ export function normalizeHookResult(value: unknown): MixHookResult {
     const out: MixHookResult = {};
 
     if (typeof record.text === "string") out.text = cleanText(record.text);
+    if (typeof record.raw === "string") out.raw = cleanText(record.raw);
     if (typeof record.note === "string") {
         const note = cleanText(record.note).trim();
         if (note) out.note = note;
@@ -125,6 +162,18 @@ export function normalizeHookResult(value: unknown): MixHookResult {
         if (Object.keys(state).length) out.state = state;
     }
     if (record.store !== undefined) out.store = normalizeMechanismStore(record.store);
+    if (typeof record.lastReply === "string") out.lastReply = cleanText(record.lastReply);
+    if (Array.isArray(record.sections)) {
+        const sections: MixHookSection[] = [];
+        for (const item of record.sections) {
+            if (!item || typeof item !== "object") continue;
+            const { at, text } = item as Record<string, unknown>;
+            if (typeof at !== "string" || !(MIX_HOOK_SECTION_KEYS as readonly string[]).includes(at)) continue;
+            const body = typeof text === "string" ? cleanText(text).trim() : "";
+            if (body) sections.push({ at: at as MixSectionTitleKey, text: body });
+        }
+        if (sections.length) out.sections = sections;
+    }
     return out;
 }
 

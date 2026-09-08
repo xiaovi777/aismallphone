@@ -1304,6 +1304,26 @@
     height: 24px;
 }
 
+/* 旧轮次懒加载：顶上一颗「查看更早」 */
+.mix-load-more {
+    display: block;
+    margin: 6px auto 14px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 999px;
+    background: var(--mix-panel);
+    color: var(--mix-dim);
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s, transform 0.16s;
+}
+
+.mix-load-more:active {
+    transform: scale(0.96);
+    color: var(--mix-violet);
+}
+
 /* AI 正文：无气泡全宽，左右对称 */
 .mix-prose {
     margin: 14px 0;
@@ -2933,10 +2953,14 @@
 /* 修改方案弹窗里的操作行：几颗 chip 平分撑满一排（容器本体定义在机括段落） */
 .mix-panel-ops .mix-dock-chip {
     flex: 1;
+    /* 四颗并排要在 390 宽的屏上对齐上方文字：允许收窄，实在放不下就截尾，不许挤出去 */
+    min-width: 0;
     text-align: center;
     white-space: nowrap;
-    padding-left: 6px;
-    padding-right: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-left: 4px;
+    padding-right: 4px;
 }
 
 /* 回传轮数调节行 */
@@ -3130,7 +3154,7 @@
 /* 对局里的逃生口：一键收起全部机括界面 / 把拖乱的位置归位 */
 .mix-panel-ops {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     margin: 8px 0 2px;
 }
 

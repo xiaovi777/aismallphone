@@ -50,7 +50,7 @@ import {
 } from "@/lib/mixology/types";
 import { fetchCurrentAccount } from "@/lib/account-client";
 import { MixHallGoneError, shareHallMaterial, shareHallRecipe, updateHallMaterial, updateHallRecipe } from "@/lib/mixology/hall-client";
-import { exportMixMaterial, exportMixMaterialPng, exportMixRecipeFile, importMixRecipePack, parseMixMaterialsFromJson, parseMixMaterialsFromPng, parseMixRecipeFile } from "@/lib/mixology/transfer";
+import { exportMixMaterial, exportMixMaterialPng, exportMixRecipeFile, importMixRecipePack, mixTrustedMechanismNames, parseMixMaterialsFromJson, parseMixMaterialsFromPng, parseMixRecipeFile } from "@/lib/mixology/transfer";
 import { MixMaterialEditor } from "./mixology-editor";
 import { MixMatAutoCover, mixMatHasAutoCover } from "./mixology-preview";
 import { MixologyGame } from "./mixology-game";
@@ -330,22 +330,35 @@ export function MixologyApp({ onClose }: { onClose: () => void }) {
                 return;
             }
             const keep = editor.initial;
-            setEditor({
-                kind: editor.kind,
-                initial: keep
-                    ? {
-                        ...picked,
-                        id: keep.id,
-                        createdAt: keep.createdAt,
-                        publishedId: keep.publishedId,
-                        publishedAt: keep.publishedAt,
-                        author: keep.author,
-                        authorAvatar: keep.authorAvatar,
-                    } as MixMaterial
-                    : picked,
-            });
-            setEditorSeq((n) => n + 1);
-            showToast(`表单已换成「${picked.name}」的内容，还没保存。`);
+            const apply = () => {
+                setEditor({
+                    kind: editor.kind,
+                    initial: keep
+                        ? {
+                            ...picked,
+                            id: keep.id,
+                            createdAt: keep.createdAt,
+                            publishedId: keep.publishedId,
+                            publishedAt: keep.publishedAt,
+                            author: keep.author,
+                            authorAvatar: keep.authorAvatar,
+                        } as MixMaterial
+                        : picked,
+                });
+                setEditorSeq((n) => n + 1);
+                showToast(`表单已换成「${picked.name}」的内容，还没保存。`);
+            };
+            // 编辑器里上传的文件带信任模式：和酒柜导入同一道明示，别让这条路绕过去
+            if (picked.kind === "mechanism" && picked.trusted === true) {
+                setConfirm({
+                    title: "这个文件是信任模式的机括",
+                    body: <>「{picked.name}」的代码<b>会直接在对局页面里运行，不进沙盒</b>：能画进正文、能联网，也能读写这台小手机上的数据。<br />只在你信任来源时载入。</>,
+                    confirmText: "我知道，载入",
+                    run: apply,
+                });
+                return;
+            }
+            apply();
         } catch (error) {
             showToast(error instanceof Error ? error.message : "读取失败");
         }
@@ -359,8 +372,22 @@ export function MixologyApp({ onClose }: { onClose: () => void }) {
                 // 配方文件（整杯打包）：配方与材料按他人作品落库——搭配可换、内容不可改、不能发布
                 const pack = parseMixRecipeFile(await file.text());
                 if (pack) {
-                    showToast(importMixRecipePack(pack));
-                    refresh();
+                    const finishPack = () => {
+                        showToast(importMixRecipePack(pack));
+                        refresh();
+                    };
+                    // 整杯打包里夹着信任模式的机括：和单件导入一样，入柜前明示
+                    const trustedInPack = mixTrustedMechanismNames(pack.materials);
+                    if (trustedInPack.length) {
+                        setConfirm({
+                            title: "这杯配方里有信任模式的机括",
+                            body: <>{trustedInPack.map((n) => `「${n}」`).join("、")}的代码<b>会直接在对局页面里运行，不进沙盒</b>：能画进正文、能联网，也能读写这台小手机上的数据。<br />只在你信任来源时导入。</>,
+                            confirmText: "我知道，导入",
+                            run: finishPack,
+                        });
+                        return;
+                    }
+                    finishPack();
                     return;
                 }
             }
@@ -373,11 +400,11 @@ export function MixologyApp({ onClose }: { onClose: () => void }) {
                 showToast(materials.length > 1 ? `已导入 ${materials.length} 件材料。` : `「${materials[0].name}」已入柜。`);
             };
             // 文件里带信任模式的机括：入柜前明示（它不进沙盒，能碰本机数据）
-            const trustedOnes = materials.filter((m) => m.kind === "mechanism" && m.trusted);
+            const trustedOnes = mixTrustedMechanismNames(materials);
             if (trustedOnes.length) {
                 setConfirm({
                     title: "文件里有信任模式的机括",
-                    body: <>{trustedOnes.map((m) => `「${m.name}」`).join("、")}的代码<b>会直接在对局页面里运行，不进沙盒</b>：能画进正文、能联网，也能读写这台小手机上的数据。<br />只在你信任来源时导入。</>,
+                    body: <>{trustedOnes.map((n) => `「${n}」`).join("、")}的代码<b>会直接在对局页面里运行，不进沙盒</b>：能画进正文、能联网，也能读写这台小手机上的数据。<br />只在你信任来源时导入。</>,
                     confirmText: "我知道，导入",
                     run: finish,
                 });

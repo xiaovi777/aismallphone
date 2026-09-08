@@ -23,6 +23,7 @@ import type {
     MixTicketMaterial,
 } from "./types";
 import { MIX_SECTION_TITLE_DEFAULTS, mixEncoreRenderHtml } from "./types";
+import type { MixHookSection } from "./mechanism-protocol";
 import { MIX_CARD_NAME_LABEL, isMixCardFreeform, mixCardProfileText, mixCardTextHasNameHeading, mixCardWorldText } from "./card-freeform";
 
 export const MIX_DEFAULT_USER_NAME = "你";
@@ -50,6 +51,8 @@ export type MixAssembleInput = {
     openingIndex?: number;
     /** 当前记住的值，供 {{状态.X}} 宏取用 */
     state?: MixState;
+    /** 机括落杯前钩子挂进来的段：按 at 接在对应分段之后，标题由机括自带 */
+    sections?: MixHookSection[];
 };
 
 export type MixAssembledPrompt = {
@@ -200,29 +203,6 @@ function encoreSection(encores: MixEncoreMaterial[], charName: string, userName:
     return lines.join("\n");
 }
 
-/** 收尾核对清单：放在最后压阵，防止模型写完正文忘了必须输出的块。
- *  段名引用跟随序言的自定义标题（refs），改了标题清单仍指得到对应段。 */
-function checklistSection(
-    ticketCount: number,
-    encoreCount: number,
-    title: string,
-    refs: { glass: string; ticket: string; encore: string },
-): string | null {
-    if (!ticketCount && !encoreCount) return null;
-    const items = [`- 正文符合「${refs.glass}」。`];
-    if (ticketCount === 1) {
-        items.push(`- 回复最开头已按「${refs.ticket}」的格式输出 ${MIX_TICKET_OPEN}...${MIX_TICKET_CLOSE} 块——任何一轮都不能缺。`);
-    } else if (ticketCount > 1) {
-        items.push(`- 回复最开头已按「${refs.ticket}」的格式与顺序输出全部 ${ticketCount} 块（每块开标签带名字）——任何一轮任何一块都不能缺。`);
-    }
-    if (encoreCount === 1) {
-        items.push(`- 回复最末尾已按「${refs.encore}」的格式输出 ${MIX_ENCORE_OPEN}...${MIX_ENCORE_CLOSE} 块——任何一轮都不能缺。`);
-    } else if (encoreCount > 1) {
-        items.push(`- 回复最末尾已按「${refs.encore}」的格式与顺序输出全部 ${encoreCount} 块（每块开标签带名字）——任何一轮任何一块都不能缺。`);
-    }
-    return [`# ${title}`, "每轮回复发出前逐项核对：", ...items].join("\n");
-}
-
 function exampleSection(card: MixCharacterCard, charName: string, userName: string, title: string): string | null {
     const examples = card.examples?.filter((e) => e.text.trim());
     if (!examples?.length) return null;
@@ -268,19 +248,31 @@ export function assembleMixPrompt(input: MixAssembleInput): MixAssembledPrompt {
     const flavorText = stackBody(m.flavor, apply);
     const glassText = stackBody(m.glass, apply);
     const strengthText = stackBody(m.strength, apply);
+    // 核对：输出格式检查，叠多件按顺序拼；与序言同规则——槽里没装就没有这一段（官方出厂件可选）
+    const checklistText = stackBody(m.checklist, apply);
+
+    // 机括挂段：某一段本身为空（没装面具、没有文风）时挂在它上面的内容照样出现，
+    // 位置就是那一段本来该在的位置。宏照常替换，多件机括按钩子跑的顺序依次接。
+    const hung = (key: MixSectionTitleKey): string[] =>
+        (input.sections ?? []).filter((item) => item.at === key).map((item) => apply(item.text));
+    const withHung = (key: MixSectionTitleKey, own: string | null): string | null => {
+        const extra = hung(key);
+        if (!extra.length) return own;
+        return [own, ...extra].filter((part): part is string => Boolean(part)).join("\n\n");
+    };
 
     const sections: (string | null)[] = [
         // 序言：配了才有，宏照常替换；没配整段消失（与其他段一致）
         preface?.content.trim() ? apply(preface.content.trim()) : null,
-        baseText ? `# ${sectionTitle("base")}\n${baseText}` : null,
+        withHung("base", baseText ? `# ${sectionTitle("base")}\n${baseText}` : null),
         // 角色资料：分框表单时每框一个 ##；一框式时作者写的正文（含自己的 ## 小节）原样进来。
         // 角色名两种模式都由卡名提供——一框式正文里作者自己写了 ## 角色名 才不重复补。
-        sectionBlock(sectionTitle("character"), [
+        withHung("character", sectionBlock(sectionTitle("character"), [
             isMixCardFreeform(card) && mixCardTextHasNameHeading(profileText) ? null : `## ${MIX_CARD_NAME_LABEL}\n${charName}`,
             profileText || null,
-        ].map((l) => (l ? apply(l) : l))),
+        ].map((l) => (l ? apply(l) : l)))),
         // 用户资料：{{user}} 是谁。由面具材料提供，帮模型称呼与理解对面的人
-        persona && persona.content.trim()
+        withHung("persona", persona && persona.content.trim()
             ? [
                 // 标题写「名字」不写「你的名字」：提示词里的「你」指的是模型自己，
                 // 用界面上那个词会指代不清。其余标题一律与界面一致。
@@ -289,22 +281,18 @@ export function assembleMixPrompt(input: MixAssembleInput): MixAssembledPrompt {
                     : `# ${sectionTitle("persona")}`,
                 `## 用户人设\n${apply(persona.content.trim())}`,
             ].join("\n\n")
-            : null,
+            : null),
         // 世界与剧情：同上。分框时标题跟编辑器里那个框的标签一字不差（含「对{{user}}的初始认知」），
         // 里面的 {{user}} 会统一替换成用户的名字
-        sectionBlock(sectionTitle("world"), [worldText || null].map((l) => (l ? apply(l) : l))),
-        flavorText ? `# ${sectionTitle("flavor")}\n${flavorText}` : null,
+        withHung("world", sectionBlock(sectionTitle("world"), [worldText || null].map((l) => (l ? apply(l) : l)))),
+        withHung("flavor", flavorText ? `# ${sectionTitle("flavor")}\n${flavorText}` : null),
         // 内置协议在前，作者写的正文输出要求接在后面，各自是一个 ## 条目
-        `# ${sectionTitle("glass")}\n${PROSE_PROTOCOL}${glassText ? `\n\n## ${sectionTitle("glass")}\n${glassText}` : ""}`,
-        ticketSection(tickets, charName, userName, input.state, sectionTitle("ticket")),
-        encoreSection(encores, charName, userName, input.state, sectionTitle("encore")),
-        exampleSection(card, charName, userName, sectionTitle("examples")),
-        checklistSection(
-            tickets.filter((t) => t.contract.trim()).length,
-            encores.filter((e) => e.contract?.trim()).length,
-            sectionTitle("checklist"),
-            { glass: sectionTitle("glass"), ticket: sectionTitle("ticket"), encore: sectionTitle("encore") },
-        ),
+        withHung("glass", `# ${sectionTitle("glass")}\n${PROSE_PROTOCOL}${glassText ? `\n\n## ${sectionTitle("glass")}\n${glassText}` : ""}`),
+        withHung("ticket", ticketSection(tickets, charName, userName, input.state, sectionTitle("ticket"))),
+        withHung("encore", encoreSection(encores, charName, userName, input.state, sectionTitle("encore"))),
+        withHung("examples", exampleSection(card, charName, userName, sectionTitle("examples"))),
+        // 输出格式检查：只来自「核对」材料，不做暗兜底
+        withHung("checklist", checklistText ? `# ${sectionTitle("checklist")}\n${checklistText}` : null),
     ];
 
     const openings = card.openings.filter((o) => o.trim());
