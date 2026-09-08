@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- API 28 及以下导出文件写入公共「下载」目录需要；29+ 走 MediaStore 免权限 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- 通话按住说话/语音条录音、视频通话摄像头（WebView getUserMedia 需要壳侧转授） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
