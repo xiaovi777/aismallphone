@@ -51,6 +51,10 @@ class MainActivity : AppCompatActivity() {
         const val VERSION = "1.1.0"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
+        /** JS 桥分片大小：单次回传的 dataURL 字符数，避免大图一次性跨桥失败 */
+        private const val BLOB_CHUNK_CHARS = 256 * 1024
+        /** 单个下载允许的最大 dataURL 字符数（约合 72MB 原始文件），超出即放弃 */
+        private const val MAX_BLOB_DATAURL_CHARS = 96 * 1024 * 1024
     }
 
     private lateinit var webView: WebView
@@ -82,6 +86,7 @@ class MainActivity : AppCompatActivity() {
     private data class PendingBlobDownload(val mimeHint: String?, val contentDisposition: String?)
 
     private val pendingBlobDownloads = ConcurrentHashMap<String, PendingBlobDownload>()
+    private val blobBuffers = ConcurrentHashMap<String, StringBuilder>()
     private val blobTokenSeq = AtomicLong(0)
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private var pendingLegacyFileSave: Pair<ByteArray, String>? = null
@@ -192,7 +197,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 备份导出等下载：交给系统下载管理器，落到公共下载目录
         // 备份导出等下载：http(s) 交给系统下载管理器；blob/data 由壳内 JS 桥读出后落盘
         webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             runCatching {
@@ -236,18 +240,21 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(target)
     }
 
-    /** blob: 下载——在页面上下文把 blob 读成 dataURL，经 AndroidShell 桥回传给壳落盘。 */
+    /** blob: 下载——在页面上下文把 blob 读成 dataURL，分片经 AndroidShell 桥回传给壳落盘。 */
     private fun startBlobDownload(url: String, mimeType: String?, contentDisposition: String?) {
         val token = "dl_${blobTokenSeq.incrementAndGet()}_${System.currentTimeMillis()}"
         pendingBlobDownloads[token] = PendingBlobDownload(mimeType, contentDisposition)
         Toast.makeText(this, "正在导出…", Toast.LENGTH_SHORT).show()
         val tokenJs = JSONObject.quote(token)
         val urlJs = JSONObject.quote(url)
-        val js = "(function(){try{fetch($urlJs).then(function(r){return r.blob();}).then(function(b){" +
-            "var fr=new FileReader();fr.onload=function(){window.AndroidShell.receiveBlobDownload($tokenJs,String(fr.result));};" +
-            "fr.onerror=function(){window.AndroidShell.receiveBlobDownload($tokenJs,'');};fr.readAsDataURL(b);})" +
-            ".catch(function(){window.AndroidShell.receiveBlobDownload($tokenJs,'');});}" +
-            "catch(e){window.AndroidShell.receiveBlobDownload($tokenJs,'');}})()"
+        val js = "(function(){var T=$tokenJs;" +
+            "var push=function(d){var C=$BLOB_CHUNK_CHARS,n=Math.ceil(d.length/C),i;" +
+            "if(n===0){window.AndroidShell.receiveBlobDownloadPart(T,'',true);return;}" +
+            "for(i=0;i<n;i++){window.AndroidShell.receiveBlobDownloadPart(T,d.substr(i*C,C),i===n-1);}};" +
+            "try{fetch($urlJs).then(function(r){return r.blob();}).then(function(b){" +
+            "var fr=new FileReader();fr.onload=function(){push(String(fr.result));};" +
+            "fr.onerror=function(){push('');};fr.readAsDataURL(b);})" +
+            ".catch(function(){push('');});}catch(e){push('');}})()"
         webView.evaluateJavascript(js, null)
     }
 
@@ -370,10 +377,34 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun getVersion(): String = VERSION
 
-        /** 页面内 JS 把 blob 读成 dataURL 后回调到这里，由壳落盘（见 startBlobDownload）。 */
+        /**
+         * 页面内 JS 把 blob 读成 dataURL 后分片回调到这里，拼齐再落盘（见 startBlobDownload）。
+         * 分片是为了让几 MB 的图片也能稳定过桥，不赌单次调用能吞多大的字符串。
+         */
         @JavascriptInterface
-        fun receiveBlobDownload(token: String, dataUrl: String) {
-            val pending = pendingBlobDownloads.remove(token) ?: return
+        fun receiveBlobDownloadPart(token: String, part: String, isLast: Boolean) {
+            val pending = pendingBlobDownloads[token] ?: return
+            val buffer = blobBuffers.computeIfAbsent(token) { StringBuilder() }
+            val dataUrl: String?
+            var tooLarge = false
+            synchronized(buffer) {
+                if (buffer.length + part.length > MAX_BLOB_DATAURL_CHARS) {
+                    tooLarge = true
+                    dataUrl = null
+                } else {
+                    buffer.append(part)
+                    dataUrl = if (isLast) buffer.toString() else null
+                }
+                if (isLast || tooLarge) buffer.setLength(0)
+            }
+            if (isLast || tooLarge) blobBuffers.remove(token)
+            if (tooLarge) {
+                pendingBlobDownloads.remove(token)
+                toastOnMain("导出失败：文件过大")
+                return
+            }
+            if (dataUrl == null) return
+            pendingBlobDownloads.remove(token)
             if (dataUrl.isBlank()) {
                 toastOnMain("导出失败：无法读取页面数据")
                 return
